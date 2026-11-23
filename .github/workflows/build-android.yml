@@ -177,6 +177,25 @@ jobs:
           echo "::endgroup::"
 
       # ---------------------------------------------------------------------
+      # Step 4a: Install required Gradle version (e.g. 9.3.1) before self-heal
+      # ---------------------------------------------------------------------
+      - name: Install required Gradle version (if newer than 8.9)
+        run: |
+          GRADLE_VER="${{ steps.toolchain.outputs.gradle_version }}"
+          echo "Detected required Gradle version: $GRADLE_VER"
+          if [ -n "$GRADLE_VER" ] && [ "$GRADLE_VER" != "8.9" ] && [ "$GRADLE_VER" != "8.0" ]; then
+            echo "Downloading Gradle $GRADLE_VER..."
+            wget -q "https://services.gradle.org/distributions/gradle-${GRADLE_VER}-bin.zip" -O /tmp/gradle.zip
+            unzip -q -o /tmp/gradle.zip -d /opt
+            rm -f /tmp/gradle.zip
+            rm -rf /opt/gradle
+            ln -s "/opt/gradle-${GRADLE_VER}" /opt/gradle
+            ln -sfn "/opt/gradle-${GRADLE_VER}/bin/gradle" /usr/local/bin/gradle
+            echo "/opt/gradle-${GRADLE_VER}/bin" >> "$GITHUB_PATH"
+            "/opt/gradle-${GRADLE_VER}/bin/gradle" --version | head -3
+          fi
+
+      # ---------------------------------------------------------------------
       # Step 4b: Self-healing system (auto-fixes common project issues)
       # ---------------------------------------------------------------------
       - name: Self-heal project (auto-fix common issues)
@@ -304,16 +323,10 @@ jobs:
         if: steps.toolchain.outputs.use_wrapper == 'false'
         run: |
           GRADLE_VER="${{ steps.toolchain.outputs.gradle_version }}"
-          echo "Image has Gradle 8.9 system-wide at /opt/gradle/bin/gradle"
+          echo "Active Gradle binary:"
           which gradle
           gradle --version | head -3
-          # The image's system gradle (8.9) is new enough for any AGP 8.x.
-          # Only download a DIFFERENT version if the project needs an older
-          # one (rare — happens for AGP <= 7.x which requires gradle 7.x).
-          # Otherwise, trust the image's gradle and let the build use it.
           if [ -n "$GRADLE_VER" ] && [ "$GRADLE_VER" != "8.9" ] && [ "$GRADLE_VER" != "8.0" ]; then
-            # Only download if the requested version is older than 8.9 (e.g. 7.5 for AGP 7.4).
-            # For newer Gradle requirements (8.7, 8.10), the image's 8.9 satisfies them.
             REQ_MAJOR=$(echo "$GRADLE_VER" | cut -d. -f1)
             if [ "$REQ_MAJOR" -lt 8 ]; then
               echo "Project wants older Gradle $GRADLE_VER — downloading..."
@@ -321,7 +334,7 @@ jobs:
               unzip -q /tmp/gradle.zip -d /opt
               echo "/opt/gradle-${GRADLE_VER}/bin" >> "$GITHUB_PATH"
             else
-              echo "✓ Image's Gradle 8.9 satisfies the project's requirement of $GRADLE_VER+"
+              echo "✓ Active Gradle satisfies the project's requirement of $GRADLE_VER+"
             fi
           fi
 
@@ -409,8 +422,6 @@ jobs:
           ACCEPT="Accept: application/vnd.github+json"
 
           echo "=== Step 1: Create release with tag $TAG ==="
-          # Try to create the release; if it already exists (race with
-          # a previous attempt), we just look it up.
           RELEASE_RESPONSE=$(curl -sS -X POST \
             -H "$AUTH_HEADER" -H "$ACCEPT" -H "$API_VERSION" -H "Content-Type: application/json" \
             "$REPO_API/releases" \
@@ -437,7 +448,6 @@ jobs:
           for f in *.apk *.aab; do
             [ -e "$f" ] || continue
             echo "  → Uploading $f ($(stat -c%s "$f" | awk '{printf "%.1f MB", $1/1024/1024}'))..."
-            # Upload via uploads.github.com (different host than api.github.com)
             UPLOAD_URL="https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$(basename "$f")"
             HTTP_CODE=$(curl -sS -X POST \
               -H "$AUTH_HEADER" -H "$ACCEPT" -H "$API_VERSION" -H "Content-Type: application/zip" \
@@ -464,7 +474,6 @@ jobs:
             echo ""
             echo "Assets uploaded: $UPLOADED"
             echo ""
-            # List the assets via the API for the summary
             curl -sS -H "$AUTH_HEADER" -H "$ACCEPT" -H "$API_VERSION" \
               "$REPO_API/releases/$RELEASE_ID" \
               | python3 -c "
@@ -516,7 +525,6 @@ jobs:
             --toolchain "$GITHUB_WORKSPACE/toolchain.json" \
             --build "$GITHUB_WORKSPACE/build.json" \
             --collect "$GITHUB_WORKSPACE/collect.json" || true
-          # Also dump the self-heal report into the workflow summary if it exists
           if [ -f "$GITHUB_WORKSPACE/self_heal.json" ]; then
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "## 🩹 Self-heal report" >> "$GITHUB_STEP_SUMMARY"
